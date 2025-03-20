@@ -1,0 +1,157 @@
+#!/bin/bash
+
+# Exit on any error
+set -e
+
+# Colors and formatting
+GREEN='\033[0;32m'
+BLUE='\033[0;34m'
+YELLOW='\033[1;33m'
+RED='\033[0;31m'
+NC='\033[0m' # No Color
+BOLD='\033[1m'
+
+# Progress indicator function
+progress() {
+    echo -e "\n${BLUE}➔${NC} ${BOLD}$1${NC}"
+}
+
+# Success indicator function
+success() {
+    echo -e "${GREEN}✓${NC} ${BOLD}$1${NC}"
+}
+
+# Warning indicator function
+warning() {
+    echo -e "${YELLOW}!${NC} ${BOLD}$1${NC}"
+}
+
+# Error indicator function
+error() {
+    echo -e "${RED}✗${NC} ${BOLD}$1${NC}"
+    exit 1
+}
+
+NEWREV=$(git rev-parse --short HEAD)
+
+echo -e "\n${BOLD}🚀 Starting Application Deployment${NC}"
+echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
+
+progress "Setting up cache directories"
+CACHE_PATH="$APP_ROOT/cache"
+mkdir -p "$CACHE_PATH/composer" "$CACHE_PATH/npm" "$CACHE_PATH/node_modules"
+success "Cache directories created"
+
+cd "$RELEASE_PATH" || error "Could not change directory to $RELEASE_PATH"
+success "Working directory: $(pwd)"
+
+progress "Setting up storage directory"
+if [ ! -d "$APP_ROOT/storage" ]; then
+    progress "Copying storage directory to $APP_ROOT/storage"
+    cp -r "$RELEASE_PATH/storage" "$APP_ROOT/storage"
+    chown $USER:www-data "$APP_ROOT/storage"
+    chmod 2775 -R "$APP_ROOT/storage"
+    setfacl -R -m u::rwx,g::rwx,o::rx "$APP_ROOT/storage"
+    setfacl -d -R -m u::rwx,g::rwx,o::rx "$APP_ROOT/storage"
+    success "Storage directory configured"
+fi
+
+# progress "Setting up database directory"
+# if [ ! -d "$APP_ROOT/database" ]; then
+#     mkdir -p "$APP_ROOT/database"
+#     chown $USER:www-data "$APP_ROOT/database"
+#     chmod 2775 "$APP_ROOT/database"
+#     success "Database directory created"
+# fi
+
+# Set up dependency caching
+COMPOSER_CACHE_DIR="$CACHE_PATH/composer"
+NPM_CACHE_DIR="$CACHE_PATH/npm"
+SHARED_NODE_MODULES="$CACHE_PATH/node_modules"
+
+progress "Installing dependencies"
+echo -e "${BLUE}┌─ Installing Composer packages${NC}"
+COMPOSER_CACHE_DIR=$COMPOSER_CACHE_DIR composer install --no-dev --optimize-autoloader --prefer-dist
+success "Composer dependencies installed"
+
+echo -e "${BLUE}┌─ Installing NPM packages${NC}"
+npm config set cache "$NPM_CACHE_DIR"
+ln -sf "$SHARED_NODE_MODULES" "$RELEASE_PATH/node_modules"
+rm -rf node_modules package-lock.json # to deal with rasberry pi architecture differences.
+npm install
+npm rebuild
+success "NPM dependencies installed"
+
+progress "Setting up environment"
+ln -s "$APP_ROOT/.env" .env
+success "Environment file linked"
+
+progress "Building assets"
+npm run build
+success "Assets built successfully"
+
+progress "Running Laravel deployment commands"
+echo -e "${BLUE}┌─ Running database migrations${NC}"
+php artisan migrate --force
+
+# Publish other vendor assets as needed
+echo -e "${BLUE}┌─ Publishing vendor assets${NC}"
+php artisan vendor:publish --tag=livewire:assets --force
+
+echo -e "${BLUE}┌─ Sync Scout Index Setting${NC}"
+php artisan scout:sync-index-settings
+
+# Clear all caches first
+echo -e "${BLUE}┌─ Clearing optimization cache${NC}"
+php artisan optimize:clear
+php artisan optimize
+
+success "Laravel commands completed"
+
+progress "Creating release manifest"
+cat >"$RELEASE_PATH/release.json" <<EOF
+{
+    "commit": "$NEWREV",
+    "timestamp": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
+    "branch": "main"
+}
+EOF
+success "Release manifest created"
+
+progress "Setting permissions"
+chown -R $USER:www-data "$RELEASE_PATH"
+chmod -R g+w "$RELEASE_PATH"
+success "Permissions updated"
+
+progress "Setting up storage symlinks"
+rm -rf "$RELEASE_PATH/storage"
+ln -nfs "$APP_ROOT/storage" "$RELEASE_PATH/storage"
+success "Storage symlink created"
+
+progress "Fixing storage symlink for public access"
+rm -rf "$RELEASE_PATH/public/storage"
+ln -s "$APP_ROOT/storage/app/public" "$RELEASE_PATH/public/storage"
+success "Correct public storage symlink created"
+
+# progress "Setting up database symlink"
+# rm -f "$RELEASE_PATH/database/database.sqlite"
+# chmod 775 "$APP_ROOT/database/database.sqlite"
+# ln -nfs "$APP_ROOT/database/database.sqlite" "$RELEASE_PATH/database/database.sqlite"
+# success "Database symlink created"
+
+progress "Finalizing deployment"
+ln -nfs "$RELEASE_PATH" "$APP_ROOT/current"
+success "Current symlink updated"
+
+progress "Reloading web server"
+sudo systemctl reload nginx
+success "Nginx reloaded"
+
+progress "Cleaning up old releases"
+cd "$RELEASES_PATH"
+ls -t | grep ${APP_NAME}_ | tail -n +6 | xargs -I {} rm -rf {}
+success "Kept latest 5 releases"
+
+echo -e "\n${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo -e "${GREEN}✨ Deployment completed successfully!${NC}"
+echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"

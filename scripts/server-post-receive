@@ -1,0 +1,74 @@
+#!/bin/bash
+set -e
+
+# Colors and formatting
+GREEN='\033[0;32m'
+BLUE='\033[0;34m'
+YELLOW='\033[1;33m'
+RED='\033[0;31m'
+NC='\033[0m' # No Color
+BOLD='\033[1m'
+
+# Progress indicator function
+progress() {
+    echo -e "${BLUE}➔${NC} ${BOLD}$1${NC}"
+}
+
+# Success indicator function
+success() {
+    echo -e "${GREEN}✓${NC} ${BOLD}$1${NC}"
+}
+
+# Warning indicator function
+warning() {
+    echo -e "${YELLOW}!${NC} ${BOLD}$1${NC}"
+}
+
+# Error indicator function
+error() {
+    echo -e "${RED}✗${NC} ${BOLD}$1${NC}"
+    exit 1
+}
+
+# Configuration
+APP_NAME="MyApp" # Change this to your app name
+APP_ROOT="/var/www/apps/$APP_NAME"
+RELEASES_PATH="$APP_ROOT/releases"
+REPO_PATH="/var/git/$APP_NAME.git"
+TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+RELEASE_PATH="$RELEASES_PATH/${APP_NAME}_${TIMESTAMP}"
+
+echo -e "\n${BOLD}📦 Deploying ${APP_NAME} to production${NC}"
+echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
+
+# Ensure releases directory exists
+progress "Preparing deployment directory"
+mkdir -p "$RELEASES_PATH"
+
+# Create new release directory
+progress "Creating new release directory"
+mkdir -p "$RELEASE_PATH" || error "Failed to create release directory"
+success "Created: $RELEASE_PATH"
+
+# Checkout the latest code into the new release directory
+progress "Checking out code into $RELEASE_PATH"
+git --work-tree="$RELEASE_PATH" --git-dir="$REPO_PATH" checkout -f main || error "Failed to checkout code"
+success "Checked out code into $RELEASE_PATH"
+
+echo -e "\n${BOLD}Release Path: ${NC}$RELEASE_PATH"
+
+# Execute the post-receive script from the checked-out repo with variables
+POST_RECEIVE_SCRIPT="$RELEASE_PATH/scripts/post-receive"
+echo -e "\n${BOLD}Post-receive Script: ${NC}$POST_RECEIVE_SCRIPT"
+
+chmod +x "$POST_RECEIVE_SCRIPT"
+
+if [ -x "$POST_RECEIVE_SCRIPT" ]; then
+    progress "Starting deployment process..."
+    echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
+    exec env APP_NAME="$APP_NAME" APP_ROOT="$APP_ROOT" RELEASE_PATH="$RELEASE_PATH" \
+        RELEASES_PATH="$RELEASES_PATH" REPO_PATH="$REPO_PATH" TIMESTAMP="$TIMESTAMP" \
+        "$POST_RECEIVE_SCRIPT"
+else
+    error "Post-receive script not found or not executable at $POST_RECEIVE_SCRIPT"
+fi
